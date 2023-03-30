@@ -1,0 +1,243 @@
+#!/usr/bin/env python3
+
+import re
+import socket 
+import json
+import ssl
+import sys
+import argparse
+
+# Facilitates communication between server and client via the socket
+class Controller: 
+    # Game ID 
+    __GAME_ID = ""
+    
+    # Current response from server 
+    __current_response = ""
+    # Most recent guess submitted to server and the data provided by the server (word and marks)
+    __response_guess = ""
+    # New guess from client
+    __new_guess = ""
+
+    # Initialize the controller with the given wordle_filter object, and port.
+    # Default value for the port is 27993
+    def __init__(self, filter, port, hostname, username): 
+        self.__filter = filter
+        self.__PORT = port
+        self.__HOSTNAME = hostname
+        self.__USERNAME = username
+
+    # Communicate via socket. 'data' is an encoded string. Returns JSON response as dictionary. 
+    def send_and_receive(self, socket, data):
+        socket.sendall(data)
+        response = socket.recv(1024).decode()
+        response_as_dict = json.loads(response)
+
+        # Terminate if error was encountered
+        if response_as_dict["type"] == "error":
+            error_msg = response_as_dict["message"]
+            print(f"An error was encountered by the server: {error_msg} \nTerminating.")
+            quit()
+
+        return response_as_dict 
+
+    # Start protocol – stores
+    def start(self, socket):  # !!! error handling, inappropriate calls (move conditional in here)
+        # Start with first word in the wordlist (as per create_guess_data)
+        self.__new_guess = self.__filter.create_guess_data(self.__GAME_ID)
+        # Send the first word to the server as a guess and update the current reponse to be 
+        # the resulting response from the server
+        self.__current_response = self.send_and_receive(socket, self.__new_guess)
+
+    # Retry protocol 
+    def retry(self, socket):
+        # Update response guess to be most recent guess submitted to the server 
+        self.__response_guess = self.__current_response["guesses"][-1]
+        # Pull out the word and marks from the most recent guess submitted to the server
+        word = self.__response_guess["word"]
+        marks = self.__response_guess["marks"]
+
+        # Update list of possible words based on the data we received about our most recent guess
+        # and its marks
+        self.__filter.update_words(word, marks)
+        # Update the new guess to be the first word in our new list of possible words and 
+        # convert the current guess into JSON data 
+        self.__new_guess = self.__filter.create_guess_data(self.__GAME_ID)
+        # Send the new guess to the server and update the current response 
+        self.__current_response = self.send_and_receive(socket, self.__new_guess)
+
+    # Wordle lifecycle 
+    def execute_wordle(self, socket):
+        # Establish TCP socket connection via hostname and port 
+        socket.connect((self.__HOSTNAME, self.__PORT))
+        
+        # Client hello message (encoded) 
+        hello_message_dict = {
+            "type": "hello",
+            "northeastern_username": self.__USERNAME
+        }
+        hello_msg = (json.dumps(hello_message_dict) + "\n").encode()
+
+        # Send 'hello' message to server
+        self.__current_response = self.send_and_receive(socket, hello_msg)
+
+        # Set game ID
+        self.__GAME_ID = self.__current_response["id"]
+
+        # Start procedure 
+        if self.__current_response["type"] == "start":
+            self.start(socket)
+
+        # Retry procedure
+        while self.__current_response["type"] == "retry":
+            self.retry(socket)
+
+        # Bye procedure
+        if self.__current_response["type"] == "bye":
+            # Print flag
+            print(self.__current_response["flag"])
+            return
+
+    # Run the protocol without TLS
+    def run_without_TLS(self):
+        # Verify port
+        if (self.__PORT != 27993):
+            print(f"Port is invalid. Was expecting 27993. Received: {self.__PORT}")
+            quit()
+
+        # Use socket context manager
+        with socket.socket() as s:
+            self.execute_wordle(s)
+
+    # Run the protocol with TLS
+    def run_with_TLS(self):
+        # Verify port
+        if (self.__PORT != 27994):
+            print(f"Port is invalid. Was expecting 27994. Received: {self.__PORT}")
+            quit()
+
+        # Use default context
+        context = ssl.create_default_context()
+        # Use socket context manager
+        with socket.socket() as s:
+            with context.wrap_socket(s, server_hostname = self.__HOSTNAME) as s:
+                self.execute_wordle(s)
+
+
+# Maintains a list of possible words to be used in a game of Wordle. 
+class WordleFilter:
+
+    # Initialize the WordleFilter object with a starter wordlist. 
+    def __init__(self, words):
+        self.__words = words
+    
+    # Just use the first word in the wordlist as the current guess
+    def get_new_guess(self):
+        return self.__words[0].strip("\n") 
+
+    # Return the new guess in the appropriate JSON format 
+    def create_guess_data(self, game_id):
+        new_guess_dict = {
+                "type": "guess",
+                "id": game_id,
+                "word": self.get_new_guess()
+            }
+        new_guess_msg = (json.dumps(new_guess_dict) + "\n").encode()
+        return new_guess_msg
+
+    # Filter wordlist based on marks
+    def update_words(self, word, marks):
+        # Keep track of letters that don't appear in the word (missed),
+        # appear in the word but in a different position (partial),
+        # and appear in the word in their current position (exact)
+        miss_marks = []
+        partial_marks = []
+        exact_marks = []
+
+        # Initial list of characters to be included in regex pattern for exact marks
+        exact_regex_list = [".",".",".",".","."]
+
+        # Obtain lists of letters associated with misses, partial hits, and exact hits (SEPARATE?)
+        for i in range(0, 5):
+            if marks[i] == 0:
+                miss_marks.append(word[i])
+            elif marks[i] == 1:
+                partial_marks.append(word[i])
+            elif marks[i] == 2:
+                exact_marks.append(word[i])
+                # Update exact regex pattern with exact letter at given position
+                exact_regex_list[i] = word[i] 
+            else:
+                print("Encountered error: marks contained some value other than 0,1,2") 
+                quit()
+
+        # Convert the regex pattern list to string (to avoid modifying string data)
+        exact_regex_str = ''.join(exact_regex_list)
+
+        # Remove previous guess from list of possible words (in order to avoid guessing it again)
+        self.__words.remove((word + "\n"))
+
+        # Filter out words that don't have letters in the exact marks positions 
+        new_words = list(filter(lambda x: re.match(exact_regex_str, x), self.__words))
+
+        # Eliminate intersection of missed marks with partial and exact marks 
+        # (e.g. if you have a 2 or 1 mark for one 'e' and a 0 mark for another 'e' in the guess, 
+        # don't eliminate words containing 'e' just because it's marked as 0 – there's an intersection)
+        true_miss_marks = [x for x in miss_marks if ((x not in exact_marks) and (x not in partial_marks))]
+
+        # Remove words containing letters that don't appear in the secret word
+        # (Important: builds upon running list of new_words, NOT self.__words)
+        new_words = list(filter(lambda x: all(y not in x for y in true_miss_marks), new_words))
+
+        # Update state of words 
+        self.__words =  new_words
+
+        # Return copy filtered wordlist
+        return new_words 
+
+
+
+# Main Function
+def main(): 
+    # Parse arguments with Python's argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument('-p', metavar = "port", nargs = 1, help = "specifies the TCP port that the server is listening on", type = int)
+    parser.add_argument('-s', action='store_true', help = "specifies the TCP port that the server is listening on")
+    parser.add_argument('hostname', help = "the name of the server (either a DNS name or an IP address in dotted notation)")
+    parser.add_argument('northeastern_user', help = "Khoury NEU username")
+
+    # Parse arguments. Convert Namespace to dictionary. 
+    args = parser.parse_args()
+    args_dict = vars(args)
+
+    # Initialize values for port, hostname, username, and TLS
+    port = args_dict["p"]
+    hostname = args_dict["hostname"]
+    username = args_dict["northeastern_user"]
+    use_tls = args_dict["s"]   
+
+    # Assume that the port is 27993 if '-p' is not present
+    if args_dict["p"] == None:
+        port = 27993
+
+    # Assume that the port is 27994 if '-s' is supplied and '-p' is not
+    if args_dict["s"] == True and args_dict["p"] == None:
+        port = 27994
+
+    # Obtain original wordlist from file
+    with open('words.txt') as f:
+        WORDS = f.readlines()
+    
+    # Wordle_filter and Controller
+    wordle_filter = WordleFilter(WORDS)
+    controller = Controller(wordle_filter, port, hostname, username) 
+    
+    # Run with TLS or without TLS based on use_tls bool
+    if use_tls == True:
+        controller.run_with_TLS()
+    else:
+        controller.run_without_TLS()
+
+# Run main
+if __name__ == "__main__":
+    main()
