@@ -11,9 +11,3 @@ The Wordle guessing strategy is defined in a class called "WordleFilter". This c
     6. Filter out words that contain letters that don't appear in the secret word.
 
 The next guess is defined as the first word in the updated wordlist. This could be optimized, but it was sufficient enough for this purpose.  
-
-## Challenges
-I have no background in networks, socket semantics, Linux, or systems, so a lot of this is new to me. I also haven't touched Python since before OOD, so I had to pick it up on the job. I spent a lot of time researching TCP, IP, and TLS/SSL. I wasn't sure what the best practice was for socket control flow (i.e. picking between TLS and no TLS). I haven't really worked with context managers before, so I tried to split everything up into methods to avoid a massive conditional tree and any code repetition. I didn't have too many issues with the guessing strategy, aside from fixing a few edge cases.    
-
-## Testing
-I didn't write any formal unit tests, although I'd like to if I had the time. Most of my testing was done manually via the terminal. I tested blocks of code as I developed them. Sometimes I would test lines in a separate file to isolate their behavior. This allowed me to test my socket connection, communication, control flow, and word-filtering independently. # wordle_bot
